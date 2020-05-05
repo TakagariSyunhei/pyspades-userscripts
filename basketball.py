@@ -1,13 +1,37 @@
 #-*-coding:utf-8-*-
 """
+ver1.0.0 (2015-06-21)
+	Create:鷹狩俊平（twitter:@falcon9147)
+	Beta
+
+ver1.1.0 (2015-07-26)
+	Author:鷹狩俊平（twitter:@falcon9147)
+	Add  Throw-in and Own-Goal
+	BugFix
+
+ver1.2.0 (2015-08-18)
+	Author:鷹狩俊平（twitter:@falcon9147)
+	Add MakeGoal and SaveGoal function
+
+ver1.2.1 (2017-02-19)
+	Author:鷹狩俊平（twitter:@falcon9147)
+	Add Timelimit for cancel Throw-in
+
+ver1.3.1 (2020-05-05)
+	Author:鷹狩俊平（twitter:@falcon9147)
+	Add Spurt function
+
+
 ゲームモードをバスケットボールにするスクリプト
 
 アドミンコマンド
 	/makegoal <team>
 		ゴールの作成を行う。２つのブロックをスペードで叩くことでその間の立方体空間がゴールになる
 		設定するチームはそのゴールを守るチームになる
+	
 	/savegoal
 		作成したゴールをtxtファイルに記録する。
+		<server.exeのフォルダ>/map/<マップ名>_goal.txt
 
 設定方法
 	コートサイズを変更する
@@ -22,10 +46,12 @@ This script is for Basketball game
 
 COMMANDS
 	/makegoal <team>
-		Start making goal by hitting blocks
+		Start making goal by hitting blocks.
+		The team, you choice defend the goal
 
 	/savegoal
 		Record the deta of goals
+		<server.exe_path>/map/<map_name>_goal.txt
 
 USAGE
 	How to change coat size
@@ -41,6 +67,7 @@ USAGE
 import __builtin__
 import json
 import os
+import math
 
 from pyspades.constants import *
 from pyspades.contained import BlockAction
@@ -61,6 +88,8 @@ CENTER = (256, 256)
 HIDE_POS = (0, 0, 63)
 
 THROWIN_TIME = 20
+
+SPURT_SPEED = 0.4
 
 
 """
@@ -389,6 +418,10 @@ def apply_script(protocol, connection, config):
 	class BasketBallConnection(connection):
 		goal_making = False
 		have_ball = False
+		sneak = False
+		scope = False
+		damage_stock = 0.0
+		regene = False
 
 
 		def reset_build(self):
@@ -406,6 +439,71 @@ def apply_script(protocol, connection, config):
 			self.select = False
 			self.points = None
 			self.label = None
+		
+		"""
+		HPを消費して高速で走る
+		Consuming HP, run faster 
+		"""
+		def spurt(self):
+			# ログアウト後にループ処理が残らないよう、存在の確認
+			if isinstance(self.world_object, type(None)):
+				return
+				
+			# 起動条件を確認して、座標を計算
+			if self.sneak and self.scope:
+				if self.hp < 2:
+					self.send_chat("Out of Breath")
+					return
+				
+				elif checkHolder(self, self.team.other.flag):
+					self.send_chat("You can't dash with DRIBBLING")
+					return
+				
+				else:
+					x, y, z = self.world_object.position.get()
+					ox, oy, oz = self.world_object.orientation.get()
+					
+					x2 = ox * self.speed
+					y2 = oy * self.speed
+					
+					dx = x + x2
+					dy = y + y2
+					
+					# 座標を四捨五入する丸め処理
+					ddx = math.floor(dx + 0.5)
+					ddy = math.floor(dy + 0.5)
+					
+					if ddx <= 1 or ddx >= 511:
+						dx = x
+					
+					if ddy <= 1 or ddy >= 511:
+						dy = y
+					
+					if self.protocol.map.get_solid(ddx, ddy, z+1):
+						dx = x
+						dy = y
+					
+					self.set_location((dx, dy, z))
+					self.damage_stock += 0.3
+					if self.damage_stock >= 1.0:
+						self.set_hp(self.hp - 1, type = FALL_KILL)
+						self.damage_stock -= 1.0
+					if not self.regene:
+						self.regenerate()
+						self.regene = True
+					callLater(0.01, self.spurt)
+		
+		"""
+		Spurtで消費したHPを徐々に回復する
+		Restore HP, consumed by Spurt
+		"""
+		def regenerate(self):
+			# ログアウト後にループ処理が残らないよう、存在の確認
+			if isinstance(self.world_object, type(None)):
+				return
+			if self.hp < 100 and self.hp != 0:
+				self.set_hp(self.hp + 1, type = FALL_KILL)
+			callLater(1, self.regenerate)
 		
 		def goal_successed(self, teamname):
 			if teamname == 'blue':
@@ -524,8 +622,6 @@ def apply_script(protocol, connection, config):
 							self.protocol.mode_throwin = True
 							self.protocol.throwin_team = self.team.other
 							game_reset_loop(self, THROWIN_TIME)
-							#message = MESSAGE_THROW_IN.format(team = self.protocol.throwin_team.name)
-							#self.protocol.send_chat(message, global_message = False)
 							self.protocol.declareThrowIn(self.protocol.throwin_team)
 						else:
 							self.protocol.mode_throwin = False
@@ -568,6 +664,7 @@ def apply_script(protocol, connection, config):
 						self.have_ball = True
 						flag.set(*HIDE_POS)
 						flag.update()
+						return connection.on_hit(self, 0, hit_player, type, grenade)
 			elif type == WEAPON_KILL or type == HEADSHOT_KILL:
 				if self.team == hit_player.team:
 					flag = self.team.other.flag
@@ -589,13 +686,9 @@ def apply_script(protocol, connection, config):
 						flag.update()
 			return False
 		
-		
 		def on_spawn_location(self, pos):
 			return self.team.spawn_pos
 		
-			return connection.on_connect(self)
-		
-		#プレイヤーがチーム変更するときの処理
 		def on_team_leave(self, team):
 			flag = self.team.other.flag
 			if checkHolder(self, flag):
@@ -611,7 +704,6 @@ def apply_script(protocol, connection, config):
 				self.protocol.flag_spawn_pos = (x, y, z)
 				self.drop_flag()
 				self.have_ball = False
-			print("team switch attempt")
 		
 		def on_team_changed(self, team):
 			if team.id != 0 and team.id != 1:
@@ -628,7 +720,6 @@ def apply_script(protocol, connection, config):
 				blue += 1
 			for p in self.protocol.green_team.get_players():
 				green += 1
-			print(blue, "blues and ", green, "greens left")
 		
 		def on_disconnect(self):
 			if self.team != None:
@@ -641,25 +732,28 @@ def apply_script(protocol, connection, config):
 						self.have_ball = False
 			return connection.on_disconnect(self)
 			
-		#位置座標の更新時に呼び出される処理
+		"""
+		位置座標の更新時に呼び出される処理
+		Check location of the player who hold the Intel
+		"""
 		def on_position_update(self):
-			#敵側インテルの定義
+			# 敵側インテルの定義
 			flag = self.team.other.flag
 			
-			#インテル（ボール）を所持している場合の処理
+			# インテル（ボール）を所持している場合の処理
 			if self.have_ball:
 				
-				#位置座標の取得
+				# 位置座標の取得
 				x, y, z = self.world_object.position.get()
 				
-				#godモード（サーバ管理者による編集権限）の時は何もせず後続処理
+				# godモード（サーバ管理者による編集権限）の時は何もせず後続処理
 				if self.god:
 					return connection.on_pasition_update(self)
 				
-				#スローインモード時以外の処理
+				# スローインモード時以外の処理
 				elif not self.protocol.mode_throwin:
 					
-					#座標が場外の時の処理
+					# 座標が場外の時の処理
 					if not checkCoatInside(self, x, y):
 						dx, dy = calcOutsidePosition(self, x, y)
 						self.protocol.flag_spawn_pos = (dx, dy, z)
@@ -669,10 +763,8 @@ def apply_script(protocol, connection, config):
 						self.protocol.mode_throwin = True
 						self.protocol.throwin_team = self.team.other
 						game_reset_loop(self, THROWIN_TIME)
-						#message = MESSAGE_THROW_IN.format(team = self.protocol.throwin_team.name)
-						#self.protocol.send_chat(message, global_message = False)
 						self.protocol.declareThrowIn(self.protocol.throwin_team)
-				#スローインモードの時の処理
+				# スローインモードの時の処理
 				else:
 					bx, by, bz = self.protocol.flag_spawn_pos
 					pos = (bx, by, z)
@@ -690,6 +782,31 @@ def apply_script(protocol, connection, config):
 				bx, by, bz = self.protocol.flag_spawn_pos
 				pos = (bx, by, z)
 				self.set_location(pos)
+			return connection.on_walk_update(self, up, dw, le, ri)
+		
+		def on_animation_update(self,jump,crouch,sneak,sprint):
+			if sneak:
+				self.sneak = True
+				self.spurt()
+			else:
+				self.sneak = False
+			return connection.on_animation_update(self,jump,crouch,sneak,sprint)
+		
+		def on_secondary_fire_set(self, secondary):
+			if secondary and self.tool == WEAPON_TOOL:
+				self.scope = True
+				self.spurt()
+			else:
+				self.scope = False
+			return connection.on_secondary_fire_set(self, secondary)
+		
+		def on_tool_changed(self, tool):
+			self.scope = False
+			return connection.on_tool_changed(self, tool)
+		
+		def on_kill(self, killer, type, grenade):
+			self.regene = False
+			return connection.on_kill(self, killer, type, grenade)
 	
 	
 	return BasketBallProtocol, BasketBallConnection
